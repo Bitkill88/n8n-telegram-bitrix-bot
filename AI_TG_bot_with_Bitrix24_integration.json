@@ -1,0 +1,607 @@
+{
+  "name": "ТЗ_3_Bitrix",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -2592,
+        272
+      ],
+      "id": "329b4d74-e5a2-42cf-a448-5356e0453e37",
+      "name": "Telegram Trigger",
+      "webhookId": "REPLACE_ME"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT chat_id, messages, collected_data FROM conversations WHERE chat_id = '{{ $json.message.chat.id }}'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -2368,
+        272
+      ],
+      "id": "46e965ec-d106-42f7-b5ae-a1a3a1239819",
+      "name": "Load Context from PostgreSQL",
+      "notes": "Загружаем историю переписки и собранные данные пользователя"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT stage, bitrix_deal_id FROM deals WHERE chat_id = '{{ $('Telegram Trigger').item.json.message.chat.id }}'",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2,
+      "position": [
+        -2144,
+        272
+      ],
+      "id": "de181ae9-6c5a-44f5-8bab-509c895e4edb",
+      "name": "Load Deal Stage",
+      "notes": "Загружаем текущую стадию сделки из БД"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.conversation_history }}{{ $json.collected_data_info }}{{ $json.status_info }}{{ $json.current_message }}",
+        "options": {
+          "systemMessage": "Ты — AI-ассистент компании. Твоя задача — собрать 3 обязательных поля о клиенте:\n\n1. Имя клиента\n2. Запрос/интерес (что нужно клиенту)\n3. Удобный способ связи (телефон, email, Telegram, WhatsApp)\n\nПРАВИЛА ОБЩЕНИЯ:\n- Веди дружелюбный и профессиональный диалог\n- Задавай ТОЛЬКО ОДИН вопрос за раз (не перечисляй все вопросы в одном сообщении)\n- Не спрашивай то, что клиент уже сказал\n- Не выдумывай информацию — только то, что сказал клиент\n- Учитывай историю диалога\n\nПРАВИЛА СБОРА ДАННЫХ:\n- Если клиент называет имя — запомни его\n- Если клиент описывает, что ему нужно — это запрос/интерес\n- Если клиент оставляет телефон, email или мессенджер — это способ связи\n\nОТВЕТ ВСЕГДА ДОЛЖЕН БЫТЬ ТОЛЬКО В ФОРМАТЕ JSON:\n{\n  \"reply\": \"твой ответ клиенту\",\n  \"name\": \"имя или null\",\n  \"request\": \"запрос или null\", \n  \"contact_method\": \"способ связи или null\"\n}\n\nПРИМЕРЫ:\nКлиент: \"Меня зовут Александр\"\nОтвет: {\"reply\": \"Приятно познакомиться, Александр! Чем я могу вам помочь?\", \"name\": \"Александр\", \"request\": null, \"contact_method\": null}\n\nКлиент: \"Хочу купить машину\"\nОтвет: {\"reply\": \"Хорошо! Какой тип автомобиля вас интересует?\", \"name\": null, \"request\": \"купить машину\", \"contact_method\": null}\n\nКлиент: \"Мой телефон 89501234567\"\nОтвет: {\"reply\": \"Спасибо за контакт! Я передам ваш номер менеджеру. Как вас представить?\", \"name\": null, \"request\": null, \"contact_method\": \"телефон 89501234567\"}\n\nКлиент: \"Александр, хочу купить машину, мой телефон 89501234567\"\nОтвет: {\"reply\": \"Спасибо, Александр! Я передал ваш запрос и контакт менеджеру. Ожидайте звонка в ближайшее время.\", \"name\": \"Александр\", \"request\": \"купить машину\", \"contact_method\": \"телефон 89501234567\"}\n\nПОМНИ: Отвечай ТОЛЬКО JSON, без дополнительного текста!"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        -1696,
+        272
+      ],
+      "id": "682aa6be-07d1-4a94-b577-5f575e1eda30",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b:free",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenRouter",
+      "typeVersion": 1,
+      "position": [
+        -1696,
+        512
+      ],
+      "id": "7a14c626-d8de-4058-bc44-7520b8377c30",
+      "name": "OpenRouter Chat Model"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Получаем данные из предыдущих нод\nconst telegramData = $('Telegram Trigger').item.json;\nconst contextResult = $('Load Context from PostgreSQL').item.json;\nconst dealResult = $('Load Deal Stage').item.json;\n\n// Текущее сообщение пользователя\nconst currentMessage = telegramData.message.text;\n\n// Извлекаем историю диалога из БД\nlet messages = [];\nlet collectedData = { name: null, request: null, contact_method: null };\n\n\nif (contextResult && contextResult.chat_id) {\n  // Проверяем тип messages и парсим если нужно\n  let rawMessages = contextResult.messages;\n  if (typeof rawMessages === 'string') {\n    try {\n      messages = JSON.parse(rawMessages);\n    } catch(e) {\n      messages = [];\n    }\n  } else if (Array.isArray(rawMessages)) {\n    messages = rawMessages;\n  } else if (rawMessages && typeof rawMessages === 'object') {\n    messages = Object.values(rawMessages);\n  } else {\n    messages = [];\n  }\n  \n  // Аналогично для collected_data\n  let rawCollectedData = contextResult.collected_data;\n  if (typeof rawCollectedData === 'string') {\n    try {\n      collectedData = JSON.parse(rawCollectedData);\n    } catch(e) {\n      collectedData = { name: null, request: null, contact_method: null };\n    }\n  } else if (rawCollectedData && typeof rawCollectedData === 'object') {\n    collectedData = rawCollectedData;\n  }\n}\n\nlet stage = 'new_lead';\nlet bitrixDealId = null;\n\nif (dealResult && dealResult.stage) {\n  stage = dealResult.stage || 'new_lead';\n  bitrixDealId = dealResult.bitrix_deal_id || null;\n}\n\n// ФОРМИРУЕМ ПОЛНУЮ ИСТОРИЮ\nlet conversationHistory = '';\nif (messages.length > 0) {\n  conversationHistory = 'ИСТОРИЯ ДИАЛОГА:\\n';\n  // Показываем ВСЕ сообщения для полного контекста\n  for (const msg of messages) {\n    const role = msg.role === 'user' ? 'Клиент' : 'Ассистент';\n    conversationHistory += `${role}: ${msg.content}\\n`;\n  }\n  conversationHistory += '\\n';\n} else {\n  conversationHistory = 'ИСТОРИЯ ДИАЛОГА: (новый диалог)\\n\\n';\n}\n\n// Формируем информацию о собранных данных\nlet collectedInfo = '';\nif (collectedData.name || collectedData.request || collectedData.contact_method) {\n  collectedInfo = 'УЖЕ СОБРАННЫЕ ДАННЫЕ:\\n';\n  if (collectedData.name) collectedInfo += `- Имя: ${collectedData.name}\\n`;\n  if (collectedData.request) collectedInfo += `- Запрос: ${collectedData.request}\\n`;\n  if (collectedData.contact_method) collectedInfo += `- Связь: ${collectedData.contact_method}\\n`;\n  collectedInfo += '\\n';\n}\n\n// Формируем информацию о статусе\nconst statusInfo = `СТАТУС СДЕЛКИ:\\n- Стадия: ${stage}\\n- Bitrix24 ID: ${bitrixDealId || 'не создана'}\\n\\n`;\n\n// ДЕБАГ: выводим загруженную историю\nconsole.log('=== LOADED HISTORY ===');\nconsole.log('Messages count:', messages.length);\nconsole.log('Messages:', JSON.stringify(messages, null, 2));\nconsole.log('Collected data:', JSON.stringify(collectedData, null, 2));\nconsole.log('Stage:', stage);\nconsole.log('Bitrix Deal ID:', bitrixDealId);\n\n// Возвращаем данные\nreturn {\n  conversation_history: conversationHistory,\n  collected_data_info: collectedInfo,\n  status_info: statusInfo,\n  current_message: currentMessage,\n  chat_id: telegramData.message.chat.id,\n  user_name: telegramData.message.chat.first_name || 'Клиент',\n  // ВАЖНО: передаем полную историю для сохранения\n  full_messages_history: messages,\n  full_collected_data: collectedData\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1920,
+        272
+      ],
+      "id": "af289c09-df30-46ad-b9c1-2ff30cd20b90",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Получаем ответ от AI Agent\nconst aiResponse = $input.first().json;\nconst telegramData = $('Telegram Trigger').item.json;\nconst previousContext = $('Code in JavaScript').item.json;\n\n// Парсим JSON ответ от AI\nlet parsedResponse = {};\nlet assistantReply = \"\";\nlet newData = { name: null, request: null, contact_method: null };\n\ntry {\n  let responseText = aiResponse.output || aiResponse.text || JSON.stringify(aiResponse);\n  const jsonMatch = responseText.match(/\\{[\\s\\S]*\\}/);\n  \n  if (jsonMatch) {\n    parsedResponse = JSON.parse(jsonMatch[0]);\n    assistantReply = parsedResponse.reply || responseText;\n    \n    const cleanValue = (val) => {\n      if (val === null || val === undefined) return null;\n      if (Array.isArray(val) && val.length === 1 && val[0] === null) return null;\n      if (Array.isArray(val) && val.length > 0) return val[0];\n      if (val === \"[null]\" || val === \"null\") return null;\n      return val;\n    };\n    \n    newData = {\n      name: cleanValue(parsedResponse.name),\n      request: cleanValue(parsedResponse.request),\n      contact_method: cleanValue(parsedResponse.contact_method)\n    };\n  } else {\n    assistantReply = responseText;\n  }\n} catch (e) {\n  console.error(\"Parse error:\", e);\n  assistantReply = \"Продолжайте, пожалуйста.\";\n}\n\n// Загружаем старые данные из контекста\nconst oldData = previousContext.full_collected_data || { name: null, request: null, contact_method: null };\n\n// Обновляем собранные данные\nconst updatedCollectedData = {\n  name: (newData.name !== null && newData.name !== undefined) ? newData.name : oldData.name,\n  request: (newData.request !== null && newData.request !== undefined) ? newData.request : oldData.request,\n  contact_method: (newData.contact_method !== null && newData.contact_method !== undefined) ? newData.contact_method : oldData.contact_method\n};\n\n// Подсчитываем заполненные поля\nconst filledCount = Object.values(updatedCollectedData).filter(v => v && v !== null && v !== \"\" && v !== \"[null]\").length;\n\n// Определяем стадию\nlet newStage = 'new_lead';\nif (filledCount === 0) newStage = 'new_lead';\nelse if (filledCount < 3) newStage = 'in_work';\nelse newStage = 'qualified';\n\nconst newMessages = [\n  {\n    role: \"user\",\n    content: previousContext.current_message\n  },\n  {\n    role: \"assistant\",\n    content: assistantReply\n  }\n];\n\nconsole.log('=== NEW MESSAGES ===');\nconsole.log('New messages count:', newMessages.length);\nconsole.log('New messages:', JSON.stringify(newMessages, null, 2));\n\nreturn {\n  chat_id: Number(telegramData.message.chat.id),\n  new_messages: newMessages,\n  collected_data: updatedCollectedData,\n  stage: newStage,\n  all_fields_collected: filledCount === 3,\n  assistant_reply: assistantReply\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1344,
+        272
+      ],
+      "id": "105448a6-6c3d-4eae-866a-1378f0b3c490",
+      "name": "Process AI Response"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE conversations \nSET \n    messages = COALESCE(messages, '[]'::jsonb) || '{{ JSON.stringify($json.new_messages) }}'::jsonb,\n    collected_data = '{{ JSON.stringify($json.collected_data) }}'::jsonb,\n    updated_at = NOW()\nWHERE chat_id = {{ $json.chat_id }}::bigint;\n\nINSERT INTO conversations (chat_id, messages, collected_data, updated_at)\nSELECT \n    {{ $json.chat_id }}::bigint,\n    '{{ JSON.stringify($json.new_messages) }}'::jsonb,\n    '{{ JSON.stringify($json.collected_data) }}'::jsonb,\n    NOW()\nWHERE NOT EXISTS (SELECT 1 FROM conversations WHERE chat_id = {{ $json.chat_id }}::bigint);",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1120,
+        272
+      ],
+      "id": "eab950b9-1a04-4804-959a-b7b39f051f45",
+      "name": "Save Conversation to DB"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $('Process AI Response').item.json.all_fields_collected }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              },
+              "id": "f5dcc002-8868-4196-a904-e3969f543a07"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "d36fddff-8ee0-457a-b2eb-f1ce7d34afbb",
+      "name": "Check All Fields Collected",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -2272,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PORTAL.bitrix24.ru/rest/1/YOUR_WEBHOOK_CODE/crm.deal.list.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"filter\": { \"UF_CRM_TELEGRAM_CHAT_ID\": $(\"Process AI Response\").item.json.chat_id.toString() }, \"select\": [\"ID\", \"STAGE_ID\", \"TITLE\"] } }}",
+        "options": {}
+      },
+      "id": "1b681ae2-22f3-4dde-b89e-7309b1a79808",
+      "name": "Search Bitrix Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -2048,
+        832
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "id": "654839fb-68ac-4e4e-b6d7-fdfe3d910d45"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "7c4d69e8-5b1b-4e23-99ce-bb466d16db2a",
+      "name": "Check Deal Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1824,
+        832
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PORTAL.bitrix24.ru/rest/1/YOUR_WEBHOOK_CODE/crm.deal.update.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"id\": $json.result[0].ID, \"fields\": { \"TITLE\": $(\"Process AI Response\").item.json.collected_data.name + \" - \" + $(\"Process AI Response\").item.json.collected_data.request, \"STAGE_ID\": \"C1:FINAL_INVOICE\", \"COMMENTS\": \"Контакт: \" + $(\"Process AI Response\").item.json.collected_data.contact_method } } }}",
+        "options": {}
+      },
+      "id": "ae45b3fd-a365-4643-9cf5-a051693c43d7",
+      "name": "Update Bitrix Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1600,
+        736
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE deals SET bitrix_deal_id = '{{ $json.result[0].ID }}', stage = 'qualified', updated_at = NOW() WHERE chat_id = {{ $(\"Process AI Response\").item.json.chat_id }}::bigint",
+        "options": {}
+      },
+      "id": "b4f4e28f-a749-4af3-bfe1-76a9a412a553",
+      "name": "Save Bitrix Deal ID",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1152,
+        832
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PORTAL.bitrix24.ru/rest/1/YOUR_WEBHOOK_CODE/crm.deal.add.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"fields\": { \"TITLE\": $(\"Process AI Response\").item.json.collected_data.name + \" - \" + $(\"Process AI Response\").item.json.collected_data.request, \"STAGE_ID\": \"C1:FINAL_INVOICE\", \"UF_CRM_TELEGRAM_CHAT_ID\": $(\"Process AI Response\").item.json.chat_id.toString(), \"COMMENTS\": \"Контакт: \" + $(\"Process AI Response\").item.json.collected_data.contact_method, \"SOURCE_ID\": \"TELEGRAM\" } } }}",
+        "options": {}
+      },
+      "id": "cba4bf7a-8e7e-47eb-b08a-857d98f8e01c",
+      "name": "Create Bitrix Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1600,
+        928
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO deals (chat_id, stage, updated_at) \nVALUES (\n    {{ $(\"Telegram Trigger\").item.json.message.from.id }}::bigint,\n    '{{ $(\"Process AI Response\").item.json.stage }}',\n    NOW()\n)\nON CONFLICT (chat_id) DO UPDATE SET \n    stage = EXCLUDED.stage,\n    updated_at = NOW()",
+        "options": {}
+      },
+      "id": "a5abd4c8-b576-4614-a905-dc00d0c010dd",
+      "name": "Update Deals Stage Only",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -2048,
+        1024
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Telegram Trigger').item.json.message.from.id }}",
+        "text": "={{ $('Process AI Response').item.json.assistant_reply }}",
+        "additionalFields": {}
+      },
+      "id": "9c815c38-3c1e-4c03-93b0-6c1dd7bcecac",
+      "name": "Send Reply to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        -2496,
+        928
+      ],
+      "webhookId": "REPLACE_ME"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_PORTAL.bitrix24.ru/rest/1/YOUR_WEBHOOK_CODE/crm.deal.list.json",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"filter\": { \"UF_CRM_TELEGRAM_CHAT_ID\": $(\"Process AI Response\").item.json.chat_id.toString() }, \"select\": [\"ID\"] } }}",
+        "options": {}
+      },
+      "id": "37fc3882-ea5e-451e-a993-53bc5ab476e4",
+      "name": "Get Created Deal ID",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1376,
+        832
+      ]
+    },
+    {
+      "parameters": {
+        "content": "Загружаем сырые данные из БД для создания контекста агенту",
+        "height": 96,
+        "width": 176
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -2304,
+        160
+      ],
+      "id": "20d916ea-d0fa-4cda-b53f-3054842ead72",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Получаем данные из предыдущих нод и преобразуем в читаемый для агента формат",
+        "height": 112,
+        "width": 160
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1952,
+        144
+      ],
+      "id": "6dbc075b-ec18-4e46-bd76-86f2a8ba6e6b",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "Взял бесплатную и достаточно мощную модель от OpenAI. В продакшене придётся использовать российскую и, скорее всего, локально установленную на сервер для обеспечения информационной безопасности и соблюдения законодательства",
+        "height": 112,
+        "width": 416
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1600,
+        480
+      ],
+      "id": "3f6bc65a-575c-450d-98f9-882800b93e5f",
+      "name": "Sticky Note2"
+    },
+    {
+      "parameters": {
+        "content": "Код берет ответ AI, извлекает из него собранные данные о клиенте, определяет стадию сделки, формирует новые сообщения и передает дальше для сохранения в БД.",
+        "height": 144
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1408,
+        112
+      ],
+      "id": "c763c684-c187-4bad-811e-de2632a966f0",
+      "name": "Sticky Note3"
+    },
+    {
+      "parameters": {
+        "content": "Обращаемся через HTTP Request к вебхуку в битрикс для получения списка сделок",
+        "height": 112,
+        "width": 208
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -2144,
+        704
+      ],
+      "id": "bb793f0c-3db0-4d88-b7fd-b81c765c896c",
+      "name": "Sticky Note4"
+    },
+    {
+      "parameters": {
+        "content": "Либо создаём, либо обновляем существующую сделку также через вебхуки битрикс",
+        "height": 112
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1664,
+        1104
+      ],
+      "id": "ef758126-f807-43e8-8d9a-d5c2facf4c59",
+      "name": "Sticky Note5"
+    },
+    {
+      "parameters": {
+        "content": "Получаем список сделок и берём оттуда ID сделки в битрикс",
+        "height": 96,
+        "width": 256
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -1328,
+        720
+      ],
+      "id": "213a4d39-93ae-4214-9cbd-6eb9099b6bed",
+      "name": "Sticky Note6"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Load Context from PostgreSQL",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Context from PostgreSQL": {
+      "main": [
+        [
+          {
+            "node": "Load Deal Stage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Deal Stage": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Process AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenRouter Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process AI Response": {
+      "main": [
+        [
+          {
+            "node": "Save Conversation to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Conversation to DB": {
+      "main": [
+        [
+          {
+            "node": "Send Reply to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check All Fields Collected": {
+      "main": [
+        [
+          {
+            "node": "Search Bitrix Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Deals Stage Only",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Bitrix Deal": {
+      "main": [
+        [
+          {
+            "node": "Check Deal Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Deal Exists": {
+      "main": [
+        [
+          {
+            "node": "Update Bitrix Deal",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Bitrix Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Bitrix Deal": {
+      "main": [
+        [
+          {
+            "node": "Get Created Deal ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Bitrix Deal": {
+      "main": [
+        [
+          {
+            "node": "Get Created Deal ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Reply to Telegram": {
+      "main": [
+        [
+          {
+            "node": "Check All Fields Collected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Created Deal ID": {
+      "main": [
+        [
+          {
+            "node": "Save Bitrix Deal ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "cda88c97-acd8-49b1-99a0-7161bebd6e8c",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "id": "lLKHrOHesNthIEpf",
+  "tags": []
+}

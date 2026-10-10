@@ -1,0 +1,16 @@
+CREATE TABLE IF NOT EXISTS conversations (
+    chat_id BIGINT PRIMARY KEY,
+    messages JSONB DEFAULT '[]'::jsonb,
+    collected_data JSONB DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS deals (
+    chat_id BIGINT PRIMARY KEY,
+    bitrix_deal_id VARCHAR(255),
+    stage VARCHAR(50) DEFAULT 'new_lead',
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deals_stage ON deals(stage);
+CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at);
